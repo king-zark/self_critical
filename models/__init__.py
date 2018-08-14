@@ -14,10 +14,13 @@ from .FCModel import FCModel
 from .OldModel import ShowAttendTellModel, AllImgModel
 # from .Att2inModel import Att2inModel
 from .AttModel import *
+from .MergeAttentionModel import MergeAttentionModel
 
 def setup(opt):
     if opt.caption_model == 'fc':
         model = FCModel(opt)
+    elif opt.caption_model == 'merge_attention':
+        model = MergeAttentionModel(opt)
     elif opt.caption_model == 'show_tell':
         model = ShowTellModel(opt)
     # Att2in model in self-critical
