@@ -36,12 +36,12 @@ class MergeAttentionModel(CaptionModel):
         self.rnn_embed = nn.Linear(self.rnn_size, self.merge_size)
         self.logit_layers = getattr(opt, 'logit_layers', 1)
         if self.logit_layers == 1:
-            self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
+            self.logit = nn.Linear(self.merge_size, self.vocab_size + 1)
         else:
-            self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in
+            self.logit = [[nn.Linear(self.merge_size, self.merge_size), nn.ReLU(), nn.Dropout(0.5)] for _ in
                           range(opt.logit_layers - 1)]
             self.logit = nn.Sequential(
-                *(reduce(lambda x, y: x + y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
+                *(reduce(lambda x, y: x + y, self.logit) + [nn.Linear(self.merge_size, self.vocab_size + 1)]))
         self.ctx2att = nn.Linear(self.att_feat_size, self.att_hid_size)
         self.h2att = nn.Linear(self.rnn_size, self.att_hid_size)
         self.alpha_net = nn.Linear(self.att_hid_size, 1)
@@ -56,10 +56,10 @@ class MergeAttentionModel(CaptionModel):
             return self.soft_core(xt, fc_embeds, att_embeds, p_att_feats, att_masks, state)
 
     def soft_core(self, xt, fc_embeds, att_embeds, p_att_feats, att_masks, state):
+        rnn_feats, state = self.rnn(xt.unsqueeze(0), state)
+        rnn_embeds = self.rnn_embed(rnn_feats.squeeze(0))
         weights = self.attend(p_att_feats, att_masks, state)  # [batch, att_size]
         att_res = torch.bmm(weights.unsqueeze(1), att_embeds).squeeze(1)  # batch * att_feat_size
-        rnn_feats, state = self.rnn(xt.unsqueeze(0), state)
-        rnn_embeds = self.rnn_embed(self.dropout(rnn_feats.squeeze(0)))
         log_prob = F.log_softmax(self.logit(F.relu(rnn_embeds + fc_embeds + att_res)))
         return log_prob, state
 
