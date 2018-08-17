@@ -25,6 +25,7 @@ class MergeAttentionModel(CaptionModel):
         self.att_hid_size = opt.att_hid_size
         self.merge_size = 512
         self.is_hard_attention = True
+        self.sample_attention = True
 
         self.use_bn = getattr(opt, 'use_bn', 0)
 
@@ -50,26 +51,21 @@ class MergeAttentionModel(CaptionModel):
                                                       dropout=self.drop_prob_lm)
 
     def core(self, xt, fc_embeds, att_embeds, p_att_feats, att_masks, state):
-        if self.is_hard_attention:
-            return self.hard_core(xt, fc_embeds, att_embeds, p_att_feats, att_masks, state)
-        else:
-            return self.soft_core(xt, fc_embeds, att_embeds, p_att_feats, att_masks, state)
-
-    def soft_core(self, xt, fc_embeds, att_embeds, p_att_feats, att_masks, state):
         rnn_feats, state = self.rnn(xt.unsqueeze(0), state)
         rnn_embeds = self.rnn_embed(rnn_feats.squeeze(0))
         weights = self.attend(p_att_feats, att_masks, state)  # [batch, att_size]
-        att_res = torch.bmm(weights.unsqueeze(1), att_embeds).squeeze(1)  # batch * att_feat_size
-        log_prob = F.log_softmax(self.logit(F.relu(rnn_embeds + fc_embeds + att_res)))
-        return log_prob, state
-
-    def hard_core(self, xt, fc_embeds, att_embeds, p_att_feats, att_masks, state):
-        rnn_feats, state = self.rnn(xt.unsqueeze(0), state)
-        rnn_embeds = self.rnn_embed(rnn_feats).squeeze(0)
-        weights = self.attend(p_att_feats, att_masks, state)  # [batch, att_size]
-        predicts = self.predict(fc_embeds, att_embeds, rnn_embeds)  # [batch_size, att_size, vocab_size + 1]
-        predicts = torch.bmm(weights.unsqueeze(1), predicts).squeeze(1)
-        log_prob = torch.log(predicts + 1e-10)
+        if self.is_hard_attention:
+            if (not self.sample_attention) or self.training:
+                predicts = self.predict(fc_embeds, att_embeds, rnn_embeds)  # [batch_size, att_size, vocab_size + 1]
+                predicts = torch.bmm(weights.unsqueeze(1), predicts).squeeze(1)
+                log_prob = torch.log(predicts + 1e-10)
+            else:
+                _, indices = torch.max(weights, 1)
+                att_res = torch.index_select(att_embeds, 0, indices)
+                log_prob = F.log_softmax(self.logit(F.relu(rnn_embeds + fc_embeds + att_res)))
+        else:
+            att_res = torch.bmm(weights.unsqueeze(1), att_embeds).squeeze(1)  # batch * att_feat_size
+            log_prob = F.log_softmax(self.logit(F.relu(rnn_embeds + fc_embeds + att_res)))
         return log_prob, state
 
     def attend(self, p_att_feats, att_masks, state):
