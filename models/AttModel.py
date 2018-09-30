@@ -22,9 +22,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import misc.utils as utils
 from torch.nn.utils.rnn import PackedSequence, pack_padded_sequence, pad_packed_sequence
-
+from torch.autograd import Variable
 from .CaptionModel import CaptionModel
-
+import numpy as np
 def sort_pack_padded_sequence(input, lengths):
     sorted_lengths, indices = torch.sort(lengths, descending=True)
     tmp = pack_padded_sequence(input[indices], sorted_lengths, batch_first=True)
@@ -59,7 +59,7 @@ class AttModel(CaptionModel):
         self.att_hid_size = opt.att_hid_size
 
         self.use_bn = getattr(opt, 'use_bn', 0)
-
+        
         self.ss_prob = 0.0 # Schedule sampling probability
 
         self.embed = nn.Sequential(nn.Embedding(self.vocab_size + 1, self.input_encoding_size),
@@ -78,6 +78,7 @@ class AttModel(CaptionModel):
         self.logit_layers = getattr(opt, 'logit_layers', 1)
         if self.logit_layers == 1:
             self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
+            # self.logit2 = nn.Linear(self.rnn_size, self.vocab_size + 1)
         else:
             self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
             self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
@@ -85,8 +86,8 @@ class AttModel(CaptionModel):
 
     def init_hidden(self, bsz):
         weight = next(self.parameters())
-        return (weight.new_zeros(self.num_layers, bsz, self.rnn_size),
-                weight.new_zeros(self.num_layers, bsz, self.rnn_size))
+        return (weight.new_zeros(self.num_layers+1, bsz, self.rnn_size),
+                weight.new_zeros(self.num_layers+1, bsz, self.rnn_size))
 
     def clip_att(self, att_feats, att_masks):
         # Clip the length of att_masks and att_feats to the maximum length
@@ -113,6 +114,7 @@ class AttModel(CaptionModel):
         state = self.init_hidden(batch_size)
 
         outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
+        outputs2 = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
 
         # Prepare the features
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
@@ -138,19 +140,20 @@ class AttModel(CaptionModel):
             if i >= 1 and seq[:, i].sum() == 0:
                 break
 
-            output, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            output, output2, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
             outputs[:, i] = output
+            outputs2[:, i] = output2
 
-        return outputs
+        return (outputs, outputs2)
 
     def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state):
         # 'it' contains a word index
         xt = self.embed(it)
 
-        output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
+        output, output2, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
         logprobs = F.log_softmax(self.logit(output), dim=1)
-
-        return logprobs, state
+        logprobs2 = F.log_softmax(self.logit(output2), dim=1)
+        return logprobs, logprobs2, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
@@ -175,8 +178,8 @@ class AttModel(CaptionModel):
                 if t == 0: # input <bos>
                     it = fc_feats.new_zeros([beam_size], dtype=torch.long)
 
-                logprobs, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
-
+                logprobs, logprobs2, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
+            logprobs = logprobs + 0*logprobs2
             self.done_beams[k] = self.beam_search(state, logprobs, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, opt=opt)
             seq[:, k] = self.done_beams[k][0]['seq'] # the first beam has highest cumulative score
             seqLogprobs[:, k] = self.done_beams[k][0]['logps']
@@ -420,7 +423,6 @@ class TopDownCore(nn.Module):
         h_att, c_att = self.att_lstm(att_lstm_input, (state[0][0], state[1][0]))
 
         att = self.attention(h_att, att_feats, p_att_feats, att_masks)
-
         lang_lstm_input = torch.cat([att, h_att], 1)
         # lang_lstm_input = torch.cat([att, F.dropout(h_att, self.drop_prob_lm, self.training)], 1) ?????
 
@@ -486,6 +488,46 @@ class DenseAttCore(nn.Module):
         self.lstm2 = LSTMCore(opt)
         opt.input_encoding_size = opt_input_encoding_size
 
+        # # self.emb1 = nn.Linear(opt.rnn_size, opt.rnn_size)
+        # self.emb2 = nn.Linear(opt.rnn_size, opt.rnn_size)
+
+        # fuse h_0 and h_1
+        self.fusion1 = nn.Sequential(nn.Linear(opt.rnn_size*2, opt.rnn_size),
+                                     nn.ReLU(),
+                                     nn.Dropout(opt.drop_prob_lm))
+        # # fuse h_0, h_1 and h_2
+        # self.fusion2 = nn.Sequential(nn.Linear(opt.rnn_size*3, opt.rnn_size),
+        #                              nn.ReLU(),
+        #                              nn.Dropout(opt.drop_prob_lm))
+
+    def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
+        # att_res_0 = self.att0(state[0][-1], att_feats, p_att_feats, att_masks)
+        h_0, state_0 = self.lstm0(torch.cat([xt,fc_feats],1), [state[0][0:1], state[1][0:1]])
+        att_res_1 = self.att1(h_0, att_feats, p_att_feats, att_masks)
+        h_1, state_1 = self.lstm1(torch.cat([h_0,att_res_1],1), [state[0][1:2], state[1][1:2]])
+        att_res_2 = self.att2(state[0][3:4].squeeze(0), att_feats, p_att_feats, att_masks)
+        h_2, state_2 = self.lstm2(torch.cat([state[0][3:4].squeeze(0),att_res_2],1), [state[0][2:3], state[1][2:3]])
+        h_3 = self.fusion1(torch.cat([h_0, h_1], 1)).unsqueeze(0)
+        state_3 = (h_3, h_3)
+        return self.fusion1(torch.cat([h_0, h_1], 1)), h_2, [torch.cat(_, 0) for _ in zip(state_0, state_1, state_2, state_3)]
+
+class DenseAttCore_multiATT(nn.Module):
+    def __init__(self, opt, use_maxout=False):
+        super(DenseAttCore_multiATT, self).__init__()
+        self.drop_prob_lm = opt.drop_prob_lm
+
+        # self.att0 = Attention(opt)
+        self.att1 = Attention(opt)
+        self.att2 = Attention(opt)
+
+        opt_input_encoding_size = opt.input_encoding_size
+        opt.input_encoding_size = opt.input_encoding_size + opt.rnn_size
+        self.lstm0 = LSTMCore(opt) # att_feat + word_embedding
+        opt.input_encoding_size = opt.rnn_size * 2
+        self.lstm1 = LSTMCore(opt)
+        self.lstm2 = LSTMCore(opt)
+        opt.input_encoding_size = opt_input_encoding_size
+
         # self.emb1 = nn.Linear(opt.rnn_size, opt.rnn_size)
         self.emb2 = nn.Linear(opt.rnn_size, opt.rnn_size)
 
@@ -502,8 +544,14 @@ class DenseAttCore(nn.Module):
         # att_res_0 = self.att0(state[0][-1], att_feats, p_att_feats, att_masks)
         h_0, state_0 = self.lstm0(torch.cat([xt,fc_feats],1), [state[0][0:1], state[1][0:1]])
         att_res_1 = self.att1(h_0, att_feats, p_att_feats, att_masks)
+        tmp = att_res_1
+        att_res_1 += self.att_res_1
+        self.att_res_1 = tmp
         h_1, state_1 = self.lstm1(torch.cat([h_0,att_res_1],1), [state[0][1:2], state[1][1:2]])
         att_res_2 = self.att2(h_1 + self.emb2(att_res_1), att_feats, p_att_feats, att_masks)
+        tmp = att_res_2
+        att_res_2 += self.att_res_2
+        self.att_res_2 = tmp
         h_2, state_2 = self.lstm2(torch.cat([self.fusion1(torch.cat([h_0, h_1], 1)),att_res_2],1), [state[0][2:3], state[1][2:3]])
 
         return self.fusion2(torch.cat([h_0, h_1, h_2], 1)), [torch.cat(_, 0) for _ in zip(state_0, state_1, state_2)]
@@ -521,7 +569,6 @@ class Attention(nn.Module):
         # The p_att_feats here is already projected
         att_size = att_feats.numel() // att_feats.size(0) // att_feats.size(-1)
         att = p_att_feats.view(-1, att_size, self.att_hid_size)
-        
         att_h = self.h2att(h)                        # batch * att_hid_size
         att_h = att_h.unsqueeze(1).expand_as(att)            # batch * att_size * att_hid_size
         dot = att + att_h                                   # batch * att_size * att_hid_size
@@ -531,9 +578,15 @@ class Attention(nn.Module):
         dot = dot.view(-1, att_size)                        # batch * att_size
         
         weight = F.softmax(dot, dim=1)                             # batch * att_size
+        
         if att_masks is not None:
             weight = weight * att_masks.view(-1, att_size).float()
             weight = weight / weight.sum(1, keepdim=True) # normalize to 1
+        sorted_data = torch.sort(weight, dim=1, descending=True)
+        sorted_weight = sorted_data[0][:,5]
+        weight = weight - sorted_weight.unsqueeze(1).expand(weight.size())
+        weight = F.relu(weight)
+        weight = weight / weight.sum(1, keepdim=True)
         att_feats_ = att_feats.view(-1, att_size, att_feats.size(-1)) # batch * att_size * att_feat_size
         att_res = torch.bmm(weight.unsqueeze(1), att_feats_).squeeze(1) # batch * att_feat_size
 
