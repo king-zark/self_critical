@@ -588,7 +588,7 @@ class DenseAttCore_multiATT(nn.Module):
     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None, pre_att_res_1=None, pre_att_res_2=None):
         # att_res_0 = self.att0(state[0][-1], att_feats, p_att_feats, att_masks)
         h_0, state_0 = self.lstm0(torch.cat([xt,fc_feats],1), [state[0][0:1], state[1][0:1]])
-        att_res_1 = self.att1(torch.cat([h_0, pre_att_res_1, pre_att_res_2],1), att_feats, p_att_feats, att_masks)
+        att_res_1 = self.att1(torch.cat([h_0, pre_att_res_1],1), att_feats, p_att_feats, att_masks)
         # pre_att_res_1 = 0.2*pre_att_res_1 + 1*att_res_1
         # tmp1 = pre_att_res_1.clone()
         # tmp1 = tmp1.detach()
@@ -598,7 +598,7 @@ class DenseAttCore_multiATT(nn.Module):
         pre_att_res_1.requires_grad = False
         # pre_att_res_1 = 0.5*pre_att_res_1 + 0.5*tmp1
         h_1, state_1 = self.lstm1(torch.cat([h_0,att_res_1],1), [state[0][1:2], state[1][1:2]])
-        att_res_2 = self.att2(torch.cat([state[0][3:4].squeeze(0), pre_att_res_1, pre_att_res_2],1), att_feats, p_att_feats, att_masks)
+        att_res_2 = self.att2(torch.cat([state[0][3:4].squeeze(0), pre_att_res_2],1), att_feats, p_att_feats, att_masks)
         # pre_att_res_2 = 0.2*pre_att_res_2 + 1*att_res_2
         # tmp2 = pre_att_res_1.clone()
         # tmp2 = tmp2.detach()
@@ -612,7 +612,7 @@ class DenseAttCore_multiATT(nn.Module):
         h_3 = self.fusion1(torch.cat([h_0, h_1], 1)).unsqueeze(0)
         state_3 = (h_3, h_3)
 
-        return h_1, h_2, [torch.cat(_, 0) for _ in zip(state_0, state_1, state_2, state_3)], pre_att_res_1, pre_att_res_2
+        return self.fusion1(torch.cat([h_0, h_1], 1)), h_2, [torch.cat(_, 0) for _ in zip(state_0, state_1, state_2, state_3)], pre_att_res_1, pre_att_res_2
 
 class Attention(nn.Module):
     def __init__(self, opt):
@@ -620,7 +620,7 @@ class Attention(nn.Module):
         self.rnn_size = opt.rnn_size
         self.att_hid_size = opt.att_hid_size
 
-        self.h2att = nn.Linear(self.rnn_size*3, self.att_hid_size)
+        self.h2att = nn.Linear(self.rnn_size*2, self.att_hid_size)
         self.alpha_net = nn.Linear(self.att_hid_size, 1)
 
     def forward(self, h, att_feats, p_att_feats, att_masks=None):
