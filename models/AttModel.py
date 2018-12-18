@@ -431,7 +431,7 @@ class TopDownCore(nn.Module):
         output = F.dropout(h_lang, self.drop_prob_lm, self.training)
         state = (torch.stack([h_att, h_lang]), torch.stack([c_att, c_lang]))
 
-        return output, state
+        return output, output, state
 
 
 ############################################################################
@@ -632,7 +632,7 @@ class Att2in2Core(nn.Module):
 
         output = self.dropout(next_h)
         state = (next_h.unsqueeze(0), next_c.unsqueeze(0))
-        return output, state
+        return output, output, state
 
 class Att2inCore(Att2in2Core):
     def __init__(self, opt):

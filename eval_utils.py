@@ -78,13 +78,11 @@ def eval_split(model, crit, loader, eval_kwargs={}):
     while True:
         data = loader.get_batch(split)
         n = n + loader.batch_size
-
         if data.get('labels', None) is not None and verbose_loss:
             # forward the model to get loss
             tmp = [data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
             tmp = [torch.from_numpy(_).cuda() if _ is not None else _ for _ in tmp]
             fc_feats, att_feats, labels, masks, att_masks = tmp
-
             with torch.no_grad():
                 loss = crit(model(fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:]).item()
             loss_sum = loss_sum + loss
@@ -102,10 +100,10 @@ def eval_split(model, crit, loader, eval_kwargs={}):
             seq = model(fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
         
         # Print beam search
-        if beam_size > 1 and verbose_beam:
-            for i in range(loader.batch_size):
-                print('\n'.join([utils.decode_sequence(loader.get_vocab(), _['seq'].unsqueeze(0))[0] for _ in model.done_beams[i]]))
-                print('--' * 10)
+        # if beam_size > 1 and verbose_beam:
+        #     for i in range(loader.batch_size):
+        #         print('\n'.join([utils.decode_sequence(loader.get_vocab(), _['seq'].unsqueeze(0))[0] for _ in model.module.done_beams[i]]))
+        #         print('--' * 10)
         sents = utils.decode_sequence(loader.get_vocab(), seq)
 
         for k, sent in enumerate(sents):
@@ -121,7 +119,7 @@ def eval_split(model, crit, loader, eval_kwargs={}):
 
             if verbose:
                 print('image %s: %s' %(entry['image_id'], entry['caption']))
-
+ 
         # if we wrapped around the split or used up val imgs budget then bail
         ix0 = data['bounds']['it_pos_now']
         ix1 = data['bounds']['it_max']
@@ -137,7 +135,7 @@ def eval_split(model, crit, loader, eval_kwargs={}):
             break
         if num_images >= 0 and n >= num_images:
             break
-
+        # print(predictions)
     lang_stats = None
     if lang_eval == 1:
         lang_stats = language_eval(dataset, predictions, eval_kwargs['id'], split)

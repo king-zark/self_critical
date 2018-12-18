@@ -57,7 +57,6 @@ class CaptionModel(nn.Module):
             #beam_seq : tensor containing the word indices of the decoded captions
             #beam_seq_logprobs : log-probability of each decision made, same size as beam_seq
             #beam_logprobs_sum : joint log-probability of each beam
-
             ys,ix = torch.sort(logprobsf,1,True)
             candidates = []
             cols = min(beam_size, ys.size(1))
@@ -169,7 +168,10 @@ class CaptionModel(nn.Module):
                     # move the current group one step forward in time
                     
                     it = beam_seq_table[divm][t-divm]
-                    logprobs_table[divm], state_table[divm] = self.get_logprobs_state(it.cuda(), *(args[divm] + [state_table[divm]]))
+                    logprobs_table[divm], logprobs2, state_table[divm] = self.get_logprobs_state(it.cuda(), *(args[divm] + [state_table[divm]]))
+                    logprobs_table[divm] = logprobs_table[divm] + 0.25*logprobs2
+
+                    # print(logprobs_table[divm].size())
 
         # all beams are sorted by their log-probabilities
         done_beams_table = [sorted(done_beams_table[i], key=lambda x: -x['p'])[:bdash] for i in range(group_size)]

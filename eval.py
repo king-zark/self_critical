@@ -115,6 +115,15 @@ vocab = infos['vocab'] # ix -> word mapping
 # Setup the model
 model = models.setup(opt)
 model.load_state_dict(torch.load(opt.model))
+
+param = model.parameters()
+s = 0
+for i in param:
+    l = 1
+    for j in i.size():
+        l*=j
+    s += l
+print('*********************************',s)
 model.cuda()
 model.eval()
 crit = utils.LanguageModelCriterion()

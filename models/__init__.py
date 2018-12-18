@@ -13,7 +13,8 @@ from .ShowTellModel import ShowTellModel
 from .FCModel import FCModel
 from .OldModel import ShowAttendTellModel, AllImgModel
 # from .Att2inModel import Att2inModel
-from .AttModel import *
+from .AttModel_multi import *
+# from .AttModel import *
 from .MergeAttentionModel import MergeAttentionModel
 
 def setup(opt):

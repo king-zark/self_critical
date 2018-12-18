@@ -78,7 +78,7 @@ class AttModel(CaptionModel):
         self.logit_layers = getattr(opt, 'logit_layers', 1)
         if self.logit_layers == 1:
             self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
-            self.logit2 = nn.Linear(self.rnn_size, self.vocab_size + 1)
+            # self.logit2 = nn.Linear(self.rnn_size, self.vocab_size + 1)
         else:
             self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
             self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
@@ -124,7 +124,6 @@ class AttModel(CaptionModel):
         pre_att_res_1 = Variable(torch.zeros(batch_size, self.rnn_size), requires_grad=True).cuda()
         pre_att_res_2 = Variable(torch.zeros(batch_size, self.rnn_size), requires_grad=True).cuda()
 
-
         for i in range(seq.size(1) - 1):
             if self.training and i >= 1 and self.ss_prob > 0.0: # otherwiste no need to sample
                 sample_prob = fc_feats.new(batch_size).uniform_(0, 1)
@@ -157,7 +156,7 @@ class AttModel(CaptionModel):
 
         output, output2, state, pre_att_res_1, pre_att_res_2 = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks, pre_att_res_1, pre_att_res_2)
         logprobs = F.log_softmax(self.logit(output), dim=1)
-        logprobs2 = F.log_softmax(self.logit2(output2), dim=1)
+        logprobs2 = F.log_softmax(self.logit(output2), dim=1)
 
         return logprobs, logprobs2, state, pre_att_res_1, pre_att_res_2
 
@@ -210,16 +209,23 @@ class AttModel(CaptionModel):
 
         seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
         seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
+        seq2 = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
+        seqLogprobs2 = fc_feats.new_zeros(batch_size, self.seq_length)
         for t in range(self.seq_length + 1):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
 
-            logprobs, state, pre_att_res_1, pre_att_res_2 = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, pre_att_res_1, pre_att_res_2)
-            
+            logprobs, logprobs2, state, pre_att_res_1, pre_att_res_2 = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, pre_att_res_1, pre_att_res_2)
+            # logprobs = (logprobs + 0.5*logprobs2)/1.5
+            # print('decoding_constraint',decoding_constraint)
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())
                 tmp.scatter_(1, seq[:,t-1].data.unsqueeze(1), float('-inf'))
                 logprobs = logprobs + tmp
+                tmp2 = logprobs2.new_zeros(logprobs2.size())
+                tmp2.scatter_(1, seq2[:,t-1].data.unsqueeze(1), float('-inf'))
+                logprobs2 = logprobs2 + tmp2
+                logprobs = (logprobs + 0.5*logprobs2)/1.5
 
             # sample the next word
             if t == self.seq_length: # skip if we achieve maximum length
@@ -227,15 +233,22 @@ class AttModel(CaptionModel):
             if sample_max:
                 sampleLogprobs, it = torch.max(logprobs.data, 1)
                 it = it.view(-1).long()
+                sampleLogprobs2, it2 = torch.max(logprobs2.data, 1)
+                it2 = it2.view(-1).long()
             else:
                 if temperature == 1.0:
                     prob_prev = torch.exp(logprobs.data) # fetch prev distribution: shape Nx(M+1)
+                    prob_prev2 = torch.exp(logprobs2.data) # fetch prev distribution: shape Nx(M+1)
                 else:
                     # scale logprobs by temperature
                     prob_prev = torch.exp(torch.div(logprobs.data, temperature))
                 it = torch.multinomial(prob_prev, 1)
                 sampleLogprobs = logprobs.gather(1, it) # gather the logprobs at sampled positions
+    
+                it2 = torch.multinomial(prob_prev2, 1)
+                sampleLogprobs2 = logprobs2.gather(1, it) # gather the logprobs at sampled positions
                 it = it.view(-1).long() # and flatten indices for downstream processing
+                it2 = it2.view(-1).long() # and flatten indices for downstream processing
 
             # stop when all finished
             if t == 0:
@@ -245,11 +258,15 @@ class AttModel(CaptionModel):
             it = it * unfinished.type_as(it)
             seq[:,t] = it
             seqLogprobs[:,t] = sampleLogprobs.view(-1)
+            it2 = it2 * unfinished.type_as(it)
+            seq2[:,t] = it2
+            seqLogprobs2[:,t] = sampleLogprobs2.view(-1)
             # quit loop if all sequences have finished
             if unfinished.sum() == 0:
                 break
-
-        return seq, seqLogprobs
+        seq2[:,0] = seq[:,0]
+        seqLogprobs2[:,0] = seqLogprobs[:,0]
+        return seq, seqLogprobs, seq2, seqLogprobs2
 
 class AdaAtt_lstm(nn.Module):
     def __init__(self, opt, use_maxout=True):
@@ -415,34 +432,84 @@ class AdaAttCore(nn.Module):
         atten_out = self.attention(h_out, p_out, att_feats, p_att_feats, att_masks)
         return atten_out, state
 
+# class TopDownCore(nn.Module):
+#     def __init__(self, opt, use_maxout=False):
+#         super(TopDownCore, self).__init__()
+#         self.drop_prob_lm = opt.drop_prob_lm
+
+#         self.att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size*2, opt.rnn_size) # we, fc, h^2_t-1
+#         self.lang_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size) # h^1_t, \hat v
+#         self.attention = Attention(opt)
+
+#     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None, pre_att_res_1=None, pre_att_res_2=None):
+#         prev_h = state[0][-1]
+#         att_lstm_input = torch.cat([prev_h ,fc_feats, xt], 1)
+
+#         h_att, c_att = self.att_lstm(att_lstm_input, (state[0][0], state[1][0]))
+#         # h_att = F.dropout(h_att, self.drop_prob_lm, self.training)
+#         att = self.attention(torch.cat([h_att,], 1), att_feats, p_att_feats, att_masks)
+#         lang_lstm_input = torch.cat([h_att, att], 1)
+#         # lang_lstm_input = torch.cat([att, F.dropout(h_att, self.drop_prob_lm, self.training)], 1) ?????
+#         h_lang, c_lang = self.lang_lstm(lang_lstm_input, (state[0][1], state[1][1]))
+#         pre_att_res_1 = att.clone()
+#         pre_att_res_1 = pre_att_res_1.detach()
+#         pre_att_res_1.requires_grad = False
+#         output = F.dropout(h_lang, self.drop_prob_lm, self.training)
+#         state1 = (torch.stack([h_att, h_lang]), torch.stack([c_att, c_lang]))
+#         # for the second output
+#         # att_lstm_input = torch.cat([fc_feats, prev_h], 1)
+
+#         # h_att, c_att = self.att_lstm(att_lstm_input, (state[0][0], state[1][0]))
+#         # # h_att = F.dropout(h_att, self.drop_prob_lm, self.training)
+#         att_2 = self.attention(torch.cat([prev_h,], 1), att_feats, p_att_feats, att_masks)
+#         lang_lstm_input = torch.cat([prev_h, att_2], 1)
+#         h_lang, c_lang = self.lang_lstm(lang_lstm_input, (state[0][1], state[1][1]))
+#         pre_att_res_2 = att.clone()
+#         pre_att_res_2 = pre_att_res_2.detach()
+#         pre_att_res_2.requires_grad = False
+#         output2 = F.dropout(h_lang, self.drop_prob_lm, self.training)
+
+#         return output, output2, state1, pre_att_res_1, pre_att_res_2
+
 class TopDownCore(nn.Module):
     def __init__(self, opt, use_maxout=False):
         super(TopDownCore, self).__init__()
         self.drop_prob_lm = opt.drop_prob_lm
 
-        self.att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size * 2, opt.rnn_size) # we, fc, h^2_t-1
+        self.att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size*2, opt.rnn_size) # we, fc, h^2_t-1
         self.lang_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size) # h^1_t, \hat v
         self.attention = Attention(opt)
 
     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None, pre_att_res_1=None, pre_att_res_2=None):
         prev_h = state[0][-1]
-        att_lstm_input = torch.cat([prev_h, fc_feats, xt], 1)
+        att_lstm_input = torch.cat([prev_h ,fc_feats, xt], 1)
 
         h_att, c_att = self.att_lstm(att_lstm_input, (state[0][0], state[1][0]))
         # h_att = F.dropout(h_att, self.drop_prob_lm, self.training)
-        att = self.attention(torch.cat([h_att, pre_att_res_1], 1), att_feats, p_att_feats, att_masks)
-        # pre_att_res_1 = att
+        att = self.attention(torch.cat([h_att,pre_att_res_1], 1), att_feats, p_att_feats, att_masks)
+        lang_lstm_input = torch.cat([h_att, att], 1)
+        # lang_lstm_input = torch.cat([att, F.dropout(h_att, self.drop_prob_lm, self.training)], 1) ?????
+        h_lang, c_lang = self.lang_lstm(lang_lstm_input, (state[0][1], state[1][1]))
         pre_att_res_1 = att.clone()
         pre_att_res_1 = pre_att_res_1.detach()
         pre_att_res_1.requires_grad = False
-        lang_lstm_input = torch.cat([att, h_att], 1)
-        # lang_lstm_input = torch.cat([att, F.dropout(h_att, self.drop_prob_lm, self.training)], 1) ?????
-        h_lang, c_lang = self.lang_lstm(lang_lstm_input, (state[0][1], state[1][1]))
-        
         output = F.dropout(h_lang, self.drop_prob_lm, self.training)
-        state = (torch.stack([h_att, h_lang]), torch.stack([c_att, c_lang]))
+        state1 = (torch.stack([h_att, h_lang]), torch.stack([c_att, c_lang]))
+        # for the second output
+        # att_lstm_input = torch.cat([fc_feats, prev_h], 1)
 
-        return output, state, pre_att_res_1, pre_att_res_2
+        # h_att, c_att = self.att_lstm(att_lstm_input, (state[0][0], state[1][0]))
+        # # h_att = F.dropout(h_att, self.drop_prob_lm, self.training)
+
+        # att_2 = self.attention(torch.cat([prev_h,], 1), att_feats, p_att_feats, att_masks)
+        # lang_lstm_input = torch.cat([prev_h, att_2], 1)
+        # h_lang, c_lang = self.lang_lstm(lang_lstm_input, (state[0][1], state[1][1]))
+        # pre_att_res_2 = att_2.clone()
+        # pre_att_res_2 = pre_att_res_2.detach()
+        # pre_att_res_2.requires_grad = False
+        # output2 = F.dropout(h_lang, self.drop_prob_lm, self.training)
+
+        return output, output, state1, pre_att_res_1, pre_att_res_2
 
 class TopDownCore_LSTM(nn.Module):
     def __init__(self, opt, use_maxout=False):
@@ -588,31 +655,32 @@ class DenseAttCore_multiATT(nn.Module):
     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None, pre_att_res_1=None, pre_att_res_2=None):
         # att_res_0 = self.att0(state[0][-1], att_feats, p_att_feats, att_masks)
         h_0, state_0 = self.lstm0(torch.cat([xt,fc_feats],1), [state[0][0:1], state[1][0:1]])
-        att_res_1 = self.att1(torch.cat([h_0, pre_att_res_1, pre_att_res_2],1), att_feats, p_att_feats, att_masks)
+        att_res_1 = self.att1(torch.cat([h_0,pre_att_res_1],1), att_feats, p_att_feats, att_masks)
         # pre_att_res_1 = 0.2*pre_att_res_1 + 1*att_res_1
         # tmp1 = pre_att_res_1.clone()
         # tmp1 = tmp1.detach()
         # tmp1.requires_grad = False
-        pre_att_res_1 = att_res_1.clone()
-        pre_att_res_1 = pre_att_res_1.detach()
-        pre_att_res_1.requires_grad = False
+        pre_att_res_1 = att_res_1
+        # pre_att_res_1 = att_res_1.clone()
+        # pre_att_res_1 = pre_att_res_1.detach()
+        # pre_att_res_1.requires_grad = False
         # pre_att_res_1 = 0.5*pre_att_res_1 + 0.5*tmp1
         h_1, state_1 = self.lstm1(torch.cat([h_0,att_res_1],1), [state[0][1:2], state[1][1:2]])
-        att_res_2 = self.att2(torch.cat([state[0][3:4].squeeze(0), pre_att_res_1, pre_att_res_2],1), att_feats, p_att_feats, att_masks)
+        att_res_2 = self.att2(torch.cat([state[0][3:4].squeeze(0),pre_att_res_2],1), att_feats, p_att_feats, att_masks)
         # pre_att_res_2 = 0.2*pre_att_res_2 + 1*att_res_2
         # tmp2 = pre_att_res_1.clone()
         # tmp2 = tmp2.detach()
         # tmp2.requires_grad = False
-        pre_att_res_2 = att_res_2.clone()
-        pre_att_res_2 = pre_att_res_2.detach()
-        pre_att_res_2.requires_grad = False
+        # pre_att_res_2 = att_res_2.clone()
+        # pre_att_res_2 = pre_att_res_2.detach()
+        # pre_att_res_2.requires_grad = False
         # pre_att_res_2 = 0.5*pre_att_res_2 + 0.5*tmp2
-
+        pre_att_res_2 = att_res_2
         h_2, state_2 = self.lstm2(torch.cat([state[0][3:4].squeeze(0),att_res_2],1), [state[0][2:3], state[1][2:3]])
         h_3 = self.fusion1(torch.cat([h_0, h_1], 1)).unsqueeze(0)
         state_3 = (h_3, h_3)
 
-        return h_1, h_2, [torch.cat(_, 0) for _ in zip(state_0, state_1, state_2, state_3)], pre_att_res_1, pre_att_res_2
+        return self.fusion1(torch.cat([h_0, h_1], 1)), h_2, [torch.cat(_, 0) for _ in zip(state_0, state_1, state_2, state_3)], pre_att_res_1, pre_att_res_2
 
 class Attention(nn.Module):
     def __init__(self, opt):
@@ -620,7 +688,7 @@ class Attention(nn.Module):
         self.rnn_size = opt.rnn_size
         self.att_hid_size = opt.att_hid_size
 
-        self.h2att = nn.Linear(self.rnn_size*3, self.att_hid_size)
+        self.h2att = nn.Linear(self.rnn_size * 2, self.att_hid_size)
         self.alpha_net = nn.Linear(self.att_hid_size, 1)
 
     def forward(self, h, att_feats, p_att_feats, att_masks=None):
@@ -699,7 +767,7 @@ class Att2in2Core(nn.Module):
 
         self.attention = Attention(opt)
 
-    def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
+    def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None, pre_att_res_1=None, pre_att_res_2=None):
         att_res = self.attention(state[0][-1], att_feats, p_att_feats, att_masks)
 
         all_input_sums = self.i2h(xt) + self.h2h(state[0][-1])
@@ -719,7 +787,8 @@ class Att2in2Core(nn.Module):
 
         output = self.dropout(next_h)
         state = (next_h.unsqueeze(0), next_c.unsqueeze(0))
-        return output, state
+        
+        return output, state, pre_att_res_1, pre_att_res_2
 
 class Att2inCore(Att2in2Core):
     def __init__(self, opt):
@@ -801,7 +870,7 @@ class TopDownModel(AttModel):
     def __init__(self, opt):
         super(TopDownModel, self).__init__(opt)
         self.num_layers = 2
-        self.core = TopDownCore_LSTM(opt)
+        self.core = TopDownCore(opt)
 
 class StackAttModel(AttModel):
     def __init__(self, opt):

@@ -183,7 +183,7 @@ class CaptionModel(nn.Module):
                     
                     it = beam_seq_table[divm][t-divm]
                     logprobs_table[divm], logprobs2, state_table[divm], pre_att_res_1, pre_att_res_2 = self.get_logprobs_state(it.cuda(), *(args[divm] + [state_table[divm]]), pre_att_res_1=pre_att_res_1, pre_att_res_2=pre_att_res_2)
-                    logprobs_table[divm] = logprobs_table[divm] + 0.5*logprobs2
+                    logprobs_table[divm] = logprobs_table[divm] + 0.2*logprobs2
 
         # all beams are sorted by their log-probabilities
         done_beams_table = [sorted(done_beams_table[i], key=lambda x: -x['p'])[:bdash] for i in range(group_size)]

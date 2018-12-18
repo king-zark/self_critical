@@ -57,12 +57,25 @@ class LanguageModelCriterion(nn.Module):
 
     def forward(self, input, target, mask):
         # truncate to the same size
+        input2 = input[1]
+        input = input[0]
+        input_ = input[:,1:,:]
+        input2_ = input2[:,1:,:]
+        delta = input_ - input2_
+        output1 = (delta**2)
+
+        output1 = torch.sum(output1, dim=2) * mask[:,1:]
+        output1 = torch.sum(output1) / torch.sum(mask[:,1:])
+
         target = target[:, :input.size(1)]
         mask =  mask[:, :input.size(1)]
-
         output = -input.gather(2, target.unsqueeze(2)).squeeze(2) * mask
         output = torch.sum(output) / torch.sum(mask)
-
+        
+        output2 = -input2_.gather(2, target[:,1:].unsqueeze(2)).squeeze(2) * mask[:,1:]
+        output2 = torch.sum(output2) / torch.sum(mask[:,1:])
+        # print(output, output2)
+        output = output + output2
         return output
 
 def set_lr(optimizer, lr):
