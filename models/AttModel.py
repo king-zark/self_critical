@@ -76,12 +76,12 @@ class AttModel(CaptionModel):
                                     ((nn.BatchNorm1d(self.rnn_size),) if self.use_bn==2 else ())))
 
         self.logit_layers = getattr(opt, 'logit_layers', 1)
-        if self.logit_layers == 1:
-            self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
-            # self.logit2 = nn.Linear(self.rnn_size, self.vocab_size + 1)
-        else:
-            self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
-            self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
+        # if self.logit_layers == 1:
+        #     self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
+        #     # self.logit2 = nn.Linear(self.rnn_size, self.vocab_size + 1)
+        # else:
+        #     self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
+        #     self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
         self.ctx2att = nn.Linear(self.rnn_size, self.att_hid_size)
 
     def init_hidden(self, bsz):
@@ -148,11 +148,23 @@ class AttModel(CaptionModel):
 
     def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state):
         # 'it' contains a word index
+        inds = np.array(list(range(self.vocab_size+1)))
+        inds_ = Variable(torch.from_numpy(inds)).cuda()
+        inds__ = self.embed(inds_)
+        # inds__norm = torch.norm(inds__,p=2,dim=1).unsqueeze(1).expand(inds__.size())
+        # inds__ = inds__ / inds__norm
+        # tmp = torch.zeros(inds__.size())
+        # inds__ = torch.addcdiv(tmp,1,inds__,inds__norm)
         xt = self.embed(it)
 
         output, output2, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
-        logprobs = F.log_softmax(self.logit(output), dim=1)
-        logprobs2 = F.log_softmax(self.logit(output2), dim=1)
+        logpro = output.mm(inds__.t())
+        logpro2 = output2.mm(inds__.t())
+
+        logprobs = F.log_softmax(logpro, dim=1)
+        logprobs2 = F.log_softmax(logpro2, dim=1)
+        # logprobs = F.log_softmax(self.logit(output), dim=1)
+        # logprobs2 = F.log_softmax(self.logit(output2), dim=1)
         return logprobs, logprobs2, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
