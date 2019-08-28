@@ -75,7 +75,7 @@ class LanguageModelCriterion(nn.Module):
         output2 = -input2_.gather(2, target[:,1:].unsqueeze(2)).squeeze(2) * mask[:,1:]
         output2 = torch.sum(output2) / torch.sum(mask[:,1:])
         # print(output, output2)
-        output = output + output2
+        output = output + 0*output2
         return output
 
 def set_lr(optimizer, lr):

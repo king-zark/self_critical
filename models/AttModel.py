@@ -76,12 +76,12 @@ class AttModel(CaptionModel):
                                     ((nn.BatchNorm1d(self.rnn_size),) if self.use_bn==2 else ())))
 
         self.logit_layers = getattr(opt, 'logit_layers', 1)
-        # if self.logit_layers == 1:
-        #     self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
+        if self.logit_layers == 1:
+            self.logit = nn.Sequential(nn.Linear(self.rnn_size, self.rnn_size),nn.ReLU())
         #     # self.logit2 = nn.Linear(self.rnn_size, self.vocab_size + 1)
-        # else:
-        #     self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
-        #     self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
+        else:
+            self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
+            self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
         self.ctx2att = nn.Linear(self.rnn_size, self.att_hid_size)
 
     def init_hidden(self, bsz):
@@ -150,7 +150,7 @@ class AttModel(CaptionModel):
         # 'it' contains a word index
         inds = np.array(list(range(self.vocab_size+1)))
         inds_ = Variable(torch.from_numpy(inds)).cuda()
-        inds__ = self.embed(inds_)
+        inds = self.embed(inds_)
         # inds__norm = torch.norm(inds__,p=2,dim=1).unsqueeze(1).expand(inds__.size())
         # inds__ = inds__ / inds__norm
         # tmp = torch.zeros(inds__.size())
@@ -158,14 +158,23 @@ class AttModel(CaptionModel):
         xt = self.embed(it)
 
         output, output2, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
-        logpro = output.mm(inds__.t())
-        logpro2 = output2.mm(inds__.t())
+
+        # inds = inds.t().unsqueeze(0).expand((output.size(0),inds.size(1),inds.size(0)))
+        # print(inds.size())
+        # output = output.unsqueeze(2).expand(inds.size())
+        # # output2 = output2.unsqueeze(2).expand(inds.size())
+        # logpro = torch.norm(output-inds,p=2,dim=1).squeeze()
+        # print(logpro.size())
+        # logpro2 = torch.norm(output2-inds,p=2,dim=1)
+        output = self.logit(output)
+        logpro = output.mm(inds.t())
+        # logpro2 = output2.mm(inds.t())
 
         logprobs = F.log_softmax(logpro, dim=1)
-        logprobs2 = F.log_softmax(logpro2, dim=1)
+        # logprobs2 = F.log_softmax(logpro2, dim=1)
         # logprobs = F.log_softmax(self.logit(output), dim=1)
         # logprobs2 = F.log_softmax(self.logit(output2), dim=1)
-        return logprobs, logprobs2, state
+        return logprobs, logprobs, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
@@ -218,7 +227,7 @@ class AttModel(CaptionModel):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
 
-            logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            logprobs, logprobs2, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
             
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())

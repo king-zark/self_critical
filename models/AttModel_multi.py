@@ -78,7 +78,7 @@ class AttModel(CaptionModel):
         self.logit_layers = getattr(opt, 'logit_layers', 1)
         if self.logit_layers == 1:
             self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
-            # self.logit2 = nn.Linear(self.rnn_size, self.vocab_size + 1)
+            self.logit2 = nn.Linear(self.rnn_size, self.vocab_size + 1)
         else:
             self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
             self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
@@ -156,7 +156,7 @@ class AttModel(CaptionModel):
 
         output, output2, state, pre_att_res_1, pre_att_res_2 = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks, pre_att_res_1, pre_att_res_2)
         logprobs = F.log_softmax(self.logit(output), dim=1)
-        logprobs2 = F.log_softmax(self.logit(output2), dim=1)
+        logprobs2 = F.log_softmax(self.logit2(output2), dim=1)
 
         return logprobs, logprobs2, state, pre_att_res_1, pre_att_res_2
 
@@ -193,7 +193,9 @@ class AttModel(CaptionModel):
         return seq.transpose(0, 1), seqLogprobs.transpose(0, 1)
 
     def _sample(self, fc_feats, att_feats, att_masks=None, opt={}):
-
+        w_f = open('weights.txt','a')
+        w_f.write('\n\n')
+        w_f.close()
         sample_max = opt.get('sample_max', 1)
         beam_size = opt.get('beam_size', 1)
         temperature = opt.get('temperature', 1.0)
@@ -383,7 +385,6 @@ class AdaAtt_attention(nn.Module):
         self.att2h = nn.Linear(self.rnn_size, self.rnn_size)
 
     def forward(self, h_out, fake_region, conv_feat, conv_feat_embed, att_masks=None):
-
         # View into three dimensions
         att_size = conv_feat.numel() // conv_feat.size(0) // self.rnn_size
         conv_feat = conv_feat.view(-1, att_size, self.rnn_size)
@@ -486,7 +487,7 @@ class TopDownCore(nn.Module):
 
         h_att, c_att = self.att_lstm(att_lstm_input, (state[0][0], state[1][0]))
         # h_att = F.dropout(h_att, self.drop_prob_lm, self.training)
-        att = self.attention(torch.cat([h_att,pre_att_res_1], 1), att_feats, p_att_feats, att_masks)
+        att = self.attention(torch.cat([h_att, pre_att_res_1], 1), att_feats, p_att_feats, att_masks)
         lang_lstm_input = torch.cat([h_att, att], 1)
         # lang_lstm_input = torch.cat([att, F.dropout(h_att, self.drop_prob_lm, self.training)], 1) ?????
         h_lang, c_lang = self.lang_lstm(lang_lstm_input, (state[0][1], state[1][1]))
@@ -499,15 +500,15 @@ class TopDownCore(nn.Module):
         # att_lstm_input = torch.cat([fc_feats, prev_h], 1)
 
         # h_att, c_att = self.att_lstm(att_lstm_input, (state[0][0], state[1][0]))
-        # # h_att = F.dropout(h_att, self.drop_prob_lm, self.training)
+        # h_att = F.dropout(h_att, self.drop_prob_lm, self.training)
 
-        # att_2 = self.attention(torch.cat([prev_h,], 1), att_feats, p_att_feats, att_masks)
-        # lang_lstm_input = torch.cat([prev_h, att_2], 1)
-        # h_lang, c_lang = self.lang_lstm(lang_lstm_input, (state[0][1], state[1][1]))
-        # pre_att_res_2 = att_2.clone()
-        # pre_att_res_2 = pre_att_res_2.detach()
-        # pre_att_res_2.requires_grad = False
-        # output2 = F.dropout(h_lang, self.drop_prob_lm, self.training)
+        att_2 = self.attention(torch.cat([prev_h, pre_att_res_2], 1), att_feats, p_att_feats, att_masks)
+        lang_lstm_input = torch.cat([prev_h, att_2], 1)
+        h_lang, c_lang = self.lang_lstm(lang_lstm_input, (state[0][1], state[1][1]))
+        pre_att_res_2 = att_2.clone()
+        pre_att_res_2 = pre_att_res_2.detach()
+        pre_att_res_2.requires_grad = False
+        output2 = F.dropout(h_lang, self.drop_prob_lm, self.training)
 
         return output, output, state1, pre_att_res_1, pre_att_res_2
 
@@ -707,6 +708,15 @@ class Attention(nn.Module):
         if att_masks is not None:
             weight = weight * att_masks.view(-1, att_size).float()
             weight = weight / weight.sum(1, keepdim=True) # normalize to 1
+        # print(weight.size())
+        w_f = open('weights.txt','a')
+        weight_num = weight.data.cpu().numpy()
+        for i in range(weight_num.shape[0]):
+            for j in range(weight_num.shape[1]):
+                w_f.write(str(weight_num[i][j]))
+                w_f.write('\t')
+            w_f.write('\n')
+        w_f.close()
         att_feats_ = att_feats.view(-1, att_size, att_feats.size(-1)) # batch * att_size * att_feat_size
         att_res = torch.bmm(weight.unsqueeze(1), att_feats_).squeeze(1) # batch * att_feat_size
 
